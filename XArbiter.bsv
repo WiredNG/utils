@@ -13,8 +13,12 @@ interface XArbiter #(numeric type mst_num, type data_t);
     method Bit#(TLog#(mst_num)) grant_id;
 endinterface
 
-module mkXArbiter #(Bool fixed) (XArbiter #(mst_num, data_t));
-    Arbiter_IFC#(mst_num) arb <- mkArbiter(fixed);
+module mkXArbiter #(
+    module #(Arbiter_IFC#(mst_num)) mkArb
+)(
+    XArbiter #(mst_num, data_t)
+);
+    Arbiter_IFC#(mst_num) arb <- mkArb;
 
     Vector#(mst_num, XArbiterClient#(data_t)) ifs = ?;
     for(Integer m = 0 ; m < valueOf(mst_num) ; m = m + 1) begin
