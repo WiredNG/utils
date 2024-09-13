@@ -22,4 +22,15 @@ function Bit#(n) priorityEncodeOHL (Bit#(n) in);
   return encoded;
 endfunction
 
+function Bit#(TLog#(n)) encodeOH (Bit#(n) in);
+  Bit#(TLog#(n)) encoded = 0;
+  for (Integer i = 0; i < valueOf(n); i = i + 1) begin
+    Bool test = unpack(in[i]);
+    if (test) begin
+      encoded = encoded | fromInteger(i);
+    end
+  end
+  return encoded;
+endfunction
+
 endpackage : PriorityEncodeOH
