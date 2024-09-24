@@ -24,86 +24,83 @@ module mkCrossbarIntf#(
     Vector#(mst_num, Put#(data_t)) mst_intf = ?;
     Vector#(slv_num, Get#(data_t)) slv_intf = ?;
 
-    // For each master, create a decoder to determine which slave to fire on.
-    Reg#(Maybe#(Bit#(slv_num))) mst_slv_dec[valueOf(mst_num)][2];
-    Reg#(data_t) mst_slv_payload[valueOf(mst_num)][2];
-
-    // For each slave, Create a Arbiter.
-    XArbiter#(mst_num, data_t) arb[valueOf(slv_num)];
-    Vector#(slv_num, Wire#(Bit#(mst_num))) slv_grant <- replicateM(mkDWire(0));
-
+    // For each master, Create a skid buffer, for Put interface.
+    Reg#(Bool) mst_valid [valueOf(mst_num)][2];
+    Reg#(data_t) mst_payload [valueOf(mst_num)][2];
+    // A Clear signal used for clear mst request.
+    Vector#(mst_num, Vector#(slv_num, Wire#(Bool))) mst_clear <- replicateM(replicateM(mkDWire(False)));
+    // Note: this module does not support QOS Sort of things. so dec must be One-Hot encoded;
+    Reg#(Bit#(slv_num)) mst_dec [valueOf(mst_num)][2];
     for(Integer m = 0 ; m < valueOf(mst_num) ; m = m + 1) begin
-        mst_slv_dec[m] <- mkCReg(2, Invalid);
-        mst_slv_payload[m] <- mkCReg(2, ?);
-
+        mst_valid[m] <- mkCReg(2, False);
+        mst_payload[m] <- mkCReg(2, ?);
+        mst_dec[m] <- mkCReg(2, ?);
+        // Connect master Put interface to skid buffer.
         Wire#(Bool) mst_barrier <- mkWire;
-
+        rule mst_barrier_handle(mst_valid[m][0] == False); // No pending request in skid buffer
+            mst_barrier <= True;
+        endrule
         mst_intf[m] = (
         interface Put#(data_t);
             method Action put(data_t payload);
                 let slv_dec = getRoute(fromInteger(m), payload);
                 if(mst_barrier) begin
-                    mst_slv_dec[m][0] <= Valid (slv_dec);
-                    mst_slv_payload[m][0] <= payload;
+                    mst_valid[m][0] <= True;
+                    mst_dec[m][0] <= slv_dec;
+                    mst_payload[m][0] <= payload;
                 end
             endmethod
         endinterface
         );
-        rule mst_barrier_handle(!isValid(mst_slv_dec[m][0]));
-            mst_barrier <= True;
-        endrule
-
-        rule mst_inner_handshake;
-            Bool handshaked = False;
+        // Clear master skid buffer when needed
+        rule mst_clear_handle;
+            Bool c = False;
             for(Integer s = 0 ; s < valueOf(slv_num) ; s = s + 1) begin
-                handshaked = unpack(slv_grant[s][m]) || handshaked;
+                c = c || mst_clear[m][s];
             end
-            if(handshaked) mst_slv_dec[m][1] <= Invalid;
+            if(c) mst_valid[m][1] <= False;
         endrule
     end
 
-    // For each slave, Create a decoder to determine which master to catch from.
+    // For each slave, also create a skid buffer.
+    Reg#(Bool) slv_valid [valueOf(slv_num)][2];
+    Reg#(data_t) slv_payload [valueOf(slv_num)][2];
     for(Integer s = 0 ; s < valueOf(slv_num) ; s = s + 1) begin
-        
-        // Skid buffer for slv put
-        Reg#(Maybe#(data_t)) slv_tmp[2] <- mkCReg(2, Invalid);
+        slv_valid[s] <- mkCReg(2, False);
+        slv_payload[s] <- mkCReg(2, ?);
 
-        // Arbiter
-        arb[s] <- mkArb;
-        
-        // Requester
-        for(Integer m = 0 ; m < valueOf(mst_num) ; m = m + 1) begin
-            rule req_arbiter(
-                slv_tmp[0] matches tagged Invalid &&&
-                mst_slv_dec[m][1] matches tagged Valid .vec
-            );
-                if(unpack(vec[s])) arb[s].clients[m].request(mst_slv_payload[m][1]);
-            endrule
-        end
-        
-        // Arbiter grant
-        rule grant_arbiter;
-            if(arb[s].clients[arb[s].grant_id].grant()) begin
-                Bit#(mst_num) mst_sel = 0;
-                slv_tmp[0] <= tagged Valid mst_slv_payload[arb[s].grant_id][1];
-                mst_sel[arb[s].grant_id] = 1'b1;
-                slv_grant[s] <= mst_sel;
-            end
-        endrule
-
-        // Put to slv port
+        // Connect slave Get interface to skid buffer.
         Wire#(Bool) slv_barrier <- mkWire;
+        rule slv_barrier_handler(slv_valid[s][1] == True);
+            slv_barrier <= True;
+        endrule
         slv_intf[s] = (
         interface Get#(data_t);
             method ActionValue#(data_t) get();
-                let payload = slv_tmp[1];
-                if(slv_barrier) slv_tmp[1] <= Invalid;
-                return fromMaybe(unpack(?), payload);
+                if(slv_barrier) slv_valid[s][1] <= False;
+                return slv_payload[s][1];
             endmethod
         endinterface
         );
-        rule slv_barrier_handler(slv_tmp[1] matches tagged Valid .payload);
-            slv_barrier <= True;
+    end
+
+    // Now the question is how to transfer data from master skid buffer to slave skid buffer.
+    for(Integer s = 0 ; s < valueOf(slv_num) ; s = s + 1) begin
+        // Master request arbiter.
+        XArbiter#(mst_num, data_t) arb <- mkArb;
+        for(Integer m = 0 ; m < valueOf(mst_num) ; m = m + 1) begin
+            rule submit_request_to_arb(!slv_valid[s][0] &&& mst_valid[m][1] &&& mst_dec[m][1][s] == 1'b1);
+                arb.clients[m].request(mst_payload[m][1]);
+            endrule
+        end
+
+        rule arbiter_handle(!slv_valid[s][0]);
+            let sel = arb.grant_id;
+            if(arb.clients[sel].grant) begin
+                mst_clear[sel][s] <= True;
+                slv_valid[s][0] <= True;
+                slv_payload[s][0] <= mst_payload[sel][1];
+            end
         endrule
     end
 
