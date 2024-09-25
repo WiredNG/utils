@@ -35,20 +35,13 @@ module mkCrossbarIntf#(
         mst_valid[m] <- mkCReg(2, False);
         mst_payload[m] <- mkCReg(2, ?);
         mst_dec[m] <- mkCReg(2, ?);
-        // Connect master Put interface to skid buffer.
-        Wire#(Bool) mst_barrier <- mkWire;
-        rule mst_barrier_handle(mst_valid[m][0] == False); // No pending request in skid buffer
-            mst_barrier <= True;
-        endrule
         mst_intf[m] = (
         interface Put#(data_t);
-            method Action put(data_t payload);
+            method Action put(data_t payload) if(mst_valid[m][0] == False);
                 let slv_dec = getRoute(fromInteger(m), payload);
-                if(mst_barrier) begin
-                    mst_valid[m][0] <= True;
-                    mst_dec[m][0] <= slv_dec;
-                    mst_payload[m][0] <= payload;
-                end
+                mst_valid[m][0] <= True;
+                mst_dec[m][0] <= slv_dec;
+                mst_payload[m][0] <= payload;
             endmethod
         endinterface
         );
@@ -70,14 +63,10 @@ module mkCrossbarIntf#(
         slv_payload[s] <- mkCReg(2, ?);
 
         // Connect slave Get interface to skid buffer.
-        Wire#(Bool) slv_barrier <- mkWire;
-        rule slv_barrier_handler(slv_valid[s][1] == True);
-            slv_barrier <= True;
-        endrule
         slv_intf[s] = (
         interface Get#(data_t);
-            method ActionValue#(data_t) get();
-                if(slv_barrier) slv_valid[s][1] <= False;
+            method ActionValue#(data_t) get() if(slv_valid[s][1] == True);
+                slv_valid[s][1] <= False;
                 return slv_payload[s][1];
             endmethod
         endinterface
